@@ -388,3 +388,125 @@ test('no abs hardlink targets', function (t) {
       })
     })
 })
+
+test('do not write through a pre-existing symlink', function (t) {
+  if (win32) { // no symlink support on win32 currently. TODO: test if this can be enabled somehow
+    t.plan(1)
+    t.ok(true)
+    return
+  }
+
+  t.plan(2)
+
+  const out = path.join(__dirname, 'fixtures', 'symlink-target')
+  const outside = path.join(__dirname, 'fixtures', 'symlink-target-outside')
+
+  rimraf.sync(out)
+  rimraf.sync(outside)
+  fs.mkdirSync(out, { recursive: true })
+  fs.writeFileSync(outside, 'something')
+  fs.symlinkSync(outside, path.join(out, 'config'))
+
+  const s = tarStream.pack()
+  s.entry({ name: 'config', type: 'file' }, 'overwrite')
+  s.finalize()
+
+  s.pipe(tar.extract(out))
+    .on('finish', function () {
+      t.is(fs.readFileSync(outside, 'utf-8'), 'something', 'outside file untouched')
+      t.is(fs.readFileSync(path.join(out, 'config'), 'utf-8'), 'overwrite', 'written inside cwd')
+    })
+})
+
+test('do not chmod the extraction root', function (t) {
+  if (win32) {
+    t.plan(1)
+    t.ok(true)
+    return
+  }
+
+  t.plan(1)
+
+  const out = path.join(__dirname, 'fixtures', 'chmod-root')
+
+  rimraf.sync(out)
+  fs.mkdirSync(out, { recursive: true })
+  fs.chmodSync(out, 0o755)
+
+  const s = tarStream.pack()
+  s.entry({ name: '.', type: 'directory', mode: 0o0100 })
+  s.finalize()
+
+  s.pipe(tar.extract(out))
+    .on('finish', function () {
+      t.is(fs.statSync(out).mode & 0o777, 0o755, 'root permissions unchanged')
+    })
+})
+
+test('strip setuid/setgid/sticky bits', function (t) {
+  if (win32) {
+    t.plan(1)
+    t.ok(true)
+    return
+  }
+
+  t.plan(1)
+
+  const out = path.join(__dirname, 'fixtures', 'suid')
+
+  rimraf.sync(out)
+
+  const s = tarStream.pack()
+  s.entry({ name: 'suid', type: 'file', mode: 0o4755 }, 'data')
+  s.finalize()
+
+  s.pipe(tar.extract(out))
+    .on('finish', function () {
+      t.is(fs.statSync(path.join(out, 'suid')).mode & 0o7000, 0, 'special bits stripped')
+    })
+})
+
+test('do not pack entries outside cwd', function (t) {
+  t.plan(1)
+
+  const a = path.join(__dirname, 'fixtures', 'a')
+
+  tar.pack(a, { entries: ['../b'] })
+    .on('error', function (err) {
+      t.ok(/is not a valid path/i.test(err.message))
+    })
+    .on('end', function () {
+      t.fail('should not pack outside cwd')
+    })
+    .resume()
+})
+
+test('strip does not allow symlinks to escape', function (t) {
+  if (win32) {
+    t.plan(1)
+    t.ok(true)
+    return
+  }
+
+  t.plan(2)
+
+  const out = path.join(__dirname, 'fixtures', 'strip-symlink')
+  const outside = path.join(__dirname, 'fixtures', 'strip-symlink-outside')
+
+  rimraf.sync(out)
+  rimraf.sync(outside)
+  fs.writeFileSync(outside, 'something')
+
+  const s = tarStream.pack()
+  s.entry({ name: 'prefix/link', type: 'symlink', linkname: '../strip-symlink-outside' }, function () {
+    s.entry({ name: 'prefix/link', type: 'file' }, 'overwrite', function () {
+      s.finalize()
+    })
+  })
+
+  s.pipe(tar.extract(out, { strip: 1, validateSymlinks: false }))
+    .on('error', function (err) {
+      t.ok(/is not a valid symlink/i.test(err.message))
+      t.is(fs.readFileSync(outside, 'utf-8'), 'something', 'outside file untouched')
+    })
+})
